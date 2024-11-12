@@ -1,5 +1,9 @@
 #!/bin/bash
 
+export PYSERINI_CACHE=$TMPDIR
+export IR_DATASETS_HOME=$TMPDIR/ir_datasets/
+export IR_DATASETS_TMP=$TMPDIR/tmp/ir_datasets/
+
 # Array of commands to run
 commands=(
     "python -m pyserini.search.lucene --threads 16 --batch-size 128 --index msmarco-v1-passage --topics dl19-passage --output run.msmarco-v1-passage.bm25-default.dl19.txt --bm25 --k1 0.9 --b 0.4"

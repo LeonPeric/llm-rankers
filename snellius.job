@@ -9,7 +9,7 @@
 #SBATCH --output=slurm_output_%A.out
 
 export PYSERINI_CACHE=$TMPDIR
-export IR_DATASETS_HOME=$TMPDIR/.ir_datasets/
+export IR_DATASETS_HOME=$TMPDIR/ir_datasets/
 export IR_DATASETS_TMP=$TMPDIR/tmp/ir_datasets/
 module purge
 module load 2023
