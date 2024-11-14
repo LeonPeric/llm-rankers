@@ -23,7 +23,11 @@ Avg time per query: 71.14529475331307
 ndcg_cut_10             all     0.5468
 --------------------------------
 listwise likelihood
-
+Avg comparisons: 245.0
+Avg prompt tokens: 95623.88
+Avg completion tokens: 0.0
+Avg time per query: 13.087504572868347
+ndcg_cut_10             all     0.6259
 --------------------------------
 pairwise.allpair
 
@@ -50,3 +54,8 @@ Avg time per query: 10.427725884914398
 ndcg_cut_10             all     0.6177
 --------------------------------
 setwise bubblesort
+Avg comparisons: 456.225
+Avg prompt tokens: 149433.125
+Avg completion tokens: 2281.125
+Avg time per query: 38.09882438659668
+ndcg_cut_10             all     0.6229
