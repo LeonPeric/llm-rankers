@@ -1,0 +1,61 @@
+bm25
+ndcg_cut_10             all     0.4796
+--------------------------------
+pointwise QLM
+Avg comparisons: 4.0
+Avg prompt tokens: 15103.28
+Avg completion tokens: 0.0
+Avg time per query: 2.2170573556423188
+ndcg_cut_10             all     0.5653
+--------------------------------
+pointwise yes no
+Avg comparisons: 4.0
+Avg prompt tokens: 16003.28
+Avg completion tokens: 0.0
+Avg time per query: 2.2153060233592985
+ndcg_cut_10             all     0.6148
+--------------------------------
+listwise generation
+Avg comparisons: 245.0
+Avg prompt tokens: 119736.36
+Avg completion tokens: 2479.05
+Avg time per query: 71.14529475331307
+ndcg_cut_10             all     0.5468
+--------------------------------
+listwise likelihood
+Avg comparisons: 245.0
+Avg prompt tokens: 95623.88
+Avg completion tokens: 0.0
+Avg time per query: 13.087504572868347
+ndcg_cut_10             all     0.6259
+--------------------------------
+pairwise.allpair
+
+--------------------------------
+pairwise heapsort
+Avg comparisons: 226.76
+Avg prompt tokens: 104893.63
+Avg completion tokens: 2267.6
+Avg time per query: 20.572359580993652
+ndcg_cut_10             all     0.6189
+--------------------------------
+pairwise bubblesort
+Avg comparisons: 781.55
+Avg prompt tokens: 360961.06
+Avg completion tokens: 7815.5
+Avg time per query: 68.99700552225113
+ndcg_cut_10             all     0.5866
+--------------------------------
+setwise heapsort
+Avg comparisons: 124.34
+Avg prompt tokens: 40713.185
+Avg completion tokens: 621.7
+Avg time per query: 10.427725884914398
+ndcg_cut_10             all     0.6177
+--------------------------------
+setwise bubblesort
+Avg comparisons: 456.225
+Avg prompt tokens: 149433.125
+Avg completion tokens: 2281.125
+Avg time per query: 38.09882438659668
+ndcg_cut_10             all     0.6229

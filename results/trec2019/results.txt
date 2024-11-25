@@ -29,6 +29,13 @@ Avg completion tokens: 0.0
 Avg time per query: 13.363596572432407
 ndcg_cut_10             all     0.6650
 --------------------------------
+pairwise.allpair
+Avg comparisons: 4950.0
+Avg prompt tokens: 2247148.0465116277
+Avg completion tokens: 49500.0
+Avg time per query: 460.50593534181286
+ndcg_cut_10             all     0.6660
+--------------------------------
 pairwise heapsort
 Avg comparisons: 231.02325581395348
 Avg prompt tokens: 105265.76744186046
