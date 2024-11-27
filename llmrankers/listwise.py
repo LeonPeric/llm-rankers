@@ -12,6 +12,37 @@ from transformers import (
     AutoConfig,
 )
 
+import ir_datasets
+from collections import deque
+
+
+dataset = ir_datasets.load("msmarco-passage/trec-dl-2019")
+
+qrels = dataset.qrels_dict()
+
+queries = dataset.queries_iter()
+
+queries_to_query_id = dict()
+for query in queries:
+    queries_to_query_id[query[1]] = query[0]
+
+
+def arrange_documents(documents):
+    arranged_docs = deque()
+
+    # Get keys in descending order
+    keys = sorted(documents.keys(), reverse=True)
+
+    for key in keys:
+        strings = documents[key]
+        for i, string in enumerate(strings):
+            if len(arranged_docs) == 0 or i % 2 == 0:
+                arranged_docs.append(string)
+            else:
+                arranged_docs.appendleft(string)
+
+    return list(arranged_docs)
+
 
 def max_tokens(model):
     if "gpt-4" in model:
@@ -109,7 +140,9 @@ def create_permutation_instruction_chat(
     return messages
 
 
-def create_permutation_instruction_complete(query: str, docs: List[SearchResult]):
+def create_permutation_instruction_complete(
+    query: str, docs: List[SearchResult], qrels=qrels
+):
     num = len(docs)
     message = (
         f"This is RankGPT, an intelligent assistant that can rank passages based on their relevancy to the query.\n\n"
@@ -118,13 +151,34 @@ def create_permutation_instruction_complete(query: str, docs: List[SearchResult]
     )
 
     rank = 0
+    documents_with_relevance = {0: [], 1: [], 2: [], 3: []}
+
     for doc in docs:
-        rank += 1
         content = doc.text
+        doc_id = doc.docid
+        query_id = queries_to_query_id[query]
+        if doc_id not in qrels[query_id]:
+            relevance_score = 0
+        else:
+            relevance_score = qrels[query_id][doc_id]
         content = content.replace("Title: Content: ", "")
         content = content.strip()
         content = " ".join(content.split()[:300])
+
+        documents_with_relevance[relevance_score].append(content)
+
+    print(
+        ", ".join(
+            f"{key}: {len(values)}" for key, values in documents_with_relevance.items()
+        )
+    )
+
+    sorted_docs = arrange_documents(documents_with_relevance)
+    rank = 1
+    for content in sorted_docs:
         message += f"[{rank}] {content}\n\n"
+        rank += 1
+
     message += f"The search query is: {query}"
     message += (
         f"I will rank the {num} passages above based on their relevance to the search query. The passages "
