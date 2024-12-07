@@ -25,7 +25,8 @@ class SetwiseLlmRanker(LlmRanker):
                  scoring='generation',
                  method="heapsort",
                  num_permutation=1,
-                 cache_dir=None):
+                 cache_dir=None,
+                 compare_prompt_variant='default'):
 
         self.device = device
         self.num_child = num_child
@@ -69,13 +70,19 @@ class SetwiseLlmRanker(LlmRanker):
         self.total_compare = 0
         self.total_completion_tokens = 0
         self.total_prompt_tokens = 0
+        self.total_insertion_sort_inserts = 0
+        self.compare_prompt_variant = compare_prompt_variant
 
     def compare(self, query: str, docs: List):
         self.total_compare += 1 if self.num_permutation == 1 else self.num_permutation
 
         passages = "\n\n".join([f'Passage {self.CHARACTERS[i]}: "{doc.text}"' for i, doc in enumerate(docs)])
-        input_text = f'Given a query "{query}", which of the following passages is the most relevant one to the query?\n\n' \
-                     + passages + '\n\nOutput only the passage label of the most relevant passage:'
+        if self.compare_prompt_variant == 'default':
+            input_text = f'Given a query "{query}", which of the following passages is the most relevant one to the query?\n\n' \
+                        + passages + '\n\n Output only the passage label of the most relevant passage:'
+        else:
+            input_text = f'Given a query "{query}", which of the following passages is the most relevant one to the query?\n\n' \
+                        + passages + '\n\n If their relevance is similar, or none of them is relevant, output A. Output only the passage label of the most relevant passage:'
 
         if self.scoring == 'generation':
             if self.config.model_type == 't5':
@@ -225,15 +232,192 @@ class SetwiseLlmRanker(LlmRanker):
             # Heapify root element
             self.heapify(arr, i, 0, query)
 
+    def likelihood_ranking(self, query, docs):
+        """
+        Sorts docs relevance in a single compare run, using the logits
+        """
+        self.total_compare += 1
+        passages = "\n\n".join([f'Passage {self.CHARACTERS[i]}: "{doc.text}"' for i, doc in enumerate(docs)])
+        input_text = f'Given a query "{query}", which of the following passages is the most relevant one to the query?\n\n' \
+                        + passages + '\n\n Output only the passage label of the most relevant passage:'
+
+        input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(self.device)
+        self.total_prompt_tokens += input_ids.shape[1]
+
+        with torch.no_grad():
+            if self.config.model_type == 't5':
+                logits = self.llm(input_ids=input_ids, decoder_input_ids=self.decoder_input_ids).logits[0][-1]
+            else:
+                logits = self.llm()
+            distributions = torch.softmax(logits, dim=0)
+            scores = distributions[self.target_token_ids[:len(docs)]]
+            ranked = sorted(zip([i for i in range(len(docs))], scores), key=lambda x: x[1], reverse=True)
+        return ranked
+    
+    def sort_c_elements(self, query, docs_to_sort):
+        """
+        Use LLM to sort `c` elements in one call. We can use logits for that if we have an access
+        to them
+        """
+        if self.config.model_type == 't5':
+            return [r[0] for r in self.likelihood_ranking(query, docs_to_sort)]
+        else:
+            # TODO: for black-box LLMs we could ask for a ranking e.g. 1>2>3
+            raise NotImplementedError
+    
+    def bubble_insert(self, sorted_list, el, query, sort_compare: bool = False):
+        """
+        Inserts element el into a already sorted list (descending order),
+        by "bubbling" it up. If `sort_compare` is True, asks model to order elements in
+        each comparison. If `sort_compare` is False, just checks if the newly added
+        element is the greatest among compared (theoretically less optimal).
+        """
+        pos_el = len(sorted_list)
+        sorted_list = sorted_list + [el]
+
+        # bubble el up
+        while 0 < pos_el:
+            upper_bound = pos_el + 1
+            lower_bound = max(0, upper_bound - self.num_child - 1)
+
+            # assumption here: el is at the end of the to_sort
+            to_sort = sorted_list[lower_bound:upper_bound]
+            if sort_compare:
+                ranking = self.sort_c_elements(query, to_sort)
+                
+                el_rank = ranking.index(len(to_sort) - 1)
+                sorted_to_sort = [to_sort[t] for t in ranking]
+            else:
+                # we just check which element is the largest out of
+                # elements, and move it to the front of the compared elements
+                output = self.compare(query, to_sort)
+                try:
+                    best_ind = self.CHARACTERS.index(output)
+                except ValueError:
+                    best_ind = 0
+                # If the best_ind is too large (hallucination)
+                if best_ind >= len(to_sort):
+                    best_ind = 0
+
+                if best_ind == len(to_sort) - 1:
+                    el_rank = 0
+                else:
+                    el_rank = len(to_sort) - 1
+                sorted_to_sort = [to_sort[best_ind]] + to_sort[:best_ind] + to_sort[(best_ind + 1):]
+            
+            sorted_list = sorted_list[:lower_bound] + sorted_to_sort + sorted_list[upper_bound:]
+
+            if el_rank != 0:
+                # Stop bubbling if el is not the best in to_sort
+                # for `sort_compare` = True, this means that the model correctly sorted the array
+                # for `sort_compare` = False this means that the element `el` is almost correctly placed
+                # (+ - num_children errors)
+                break
+            else:
+                pos_el = lower_bound
+        return sorted_list
+        
+
+    def insertionSort(self, arr, query, k, sort_compare: bool = False):
+        """
+        Sorts top_k elements, then scans the rest of the documents. If it finds
+        documents more relevant than the smallest one in the top_k, it inserts the document
+        into top_k.
+
+        if `sort_compare` is True, uses more efficient logits sorting, if `False` uses
+        less efficient max document querying.
+        For blackbox models `sort_compare` has to be False.
+        """
+        # Divide elements into topk, candidates and discarded
+        current_top_k_elements = copy.deepcopy(arr[:k])
+        candidates = copy.deepcopy(arr[k:])
+        discarded = []
+
+        # sort the top_k elements
+        self.heapSort(current_top_k_elements, query, k)
+        current_top_k_elements = list(reversed(current_top_k_elements))
+
+        # Go through the candidates, and if I find element better than the worst one from the current top k,
+        # replace them
+        while len(candidates) > 0:
+            candidates_to_compare = copy.deepcopy(candidates[:self.num_child])
+            candidates = candidates[self.num_child:]
+
+            worst_in_top_k = current_top_k_elements[-1]
+            to_compare = [worst_in_top_k, *candidates_to_compare]
+
+            if sort_compare:
+                ranking = self.sort_c_elements(query, to_compare)
+                best_ind = ranking[0]
+            else:
+                output = self.compare(query, to_compare)
+                ranking = None
+                try:
+                    best_ind = self.CHARACTERS.index(output)
+                except ValueError:
+                    best_ind = 0
+
+                # If the best_ind is too large (hallucination)
+                if best_ind >= len(to_compare):
+                    best_ind = 0
+
+            # if there is a more relevant document than the smallest one in top k
+            if best_ind != 0:
+                self.total_insertion_sort_inserts += 1
+
+                remaining_to_compare = []
+
+                if sort_compare:
+                    # put these that were better than the current worst_in_top_k back in candidates
+                    # discard the rest (including worst_in_top_k)
+                    next_to_discard = False
+                    for i in range(1, len(ranking), 1):
+                        if ranking[i] == 0:
+                            next_to_discard = True
+                        if next_to_discard:
+                            discarded.append(to_compare[ranking[i]])
+                        else:
+                            remaining_to_compare.append(to_compare[ranking[i]])
+                else:
+                    # discard only worst_in_top_k
+                    discarded.append(worst_in_top_k)
+                    for i in range(1, len(to_compare), 1):
+                        if i != best_ind:
+                            remaining_to_compare.append(to_compare[i])
+
+                candidates = remaining_to_compare + candidates
+
+                # Remove the last element from the top_k
+                current_top_k_elements = current_top_k_elements[:-1]
+                to_put_in_top_k = to_compare[best_ind]
+                # fix our top_k elements with bubble insert
+                # TODO: theoretically, we could use bubblesort to further optimize this insertion.
+                # for k=10 it doesn't matter, but for larger k it might be faster.
+                current_top_k_elements = self.bubble_insert(current_top_k_elements, to_put_in_top_k, query, sort_compare)
+            
+            # if all the other compared documents are worse
+            else:
+                discarded += candidates_to_compare
+
+        # Build the result
+        return current_top_k_elements + discarded
+
+
     def rerank(self,  query: str, ranking: List[SearchResult]) -> List[SearchResult]:
         original_ranking = copy.deepcopy(ranking)
         self.total_compare = 0
         self.total_completion_tokens = 0
         self.total_prompt_tokens = 0
+        self.total_insertion_sort_inserts = 0
         
         if self.method == "heapsort":
             self.heapSort(ranking, query, self.k)
             ranking = list(reversed(ranking))
+        # New reranking methods:
+        elif self.method == "insertion.sort_compare":
+            ranking = self.insertionSort(ranking, query, self.k, sort_compare=True)
+        elif self.method == "insertion.max_compare":
+            ranking = self.insertionSort(ranking, query, self.k, sort_compare=False)
         elif self.method == "bubblesort":
             last_start = len(ranking) - (self.num_child + 1)
 

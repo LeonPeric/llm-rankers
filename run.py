@@ -83,7 +83,8 @@ def main(args):
                                       scoring=args.run.scoring,
                                       method=args.setwise.method,
                                       num_permutation=args.setwise.num_permutation,
-                                      k=args.setwise.k)
+                                      k=args.setwise.k,
+                                      compare_prompt_variant=args.setwise.compare_prompt_variant)
 
     elif args.pairwise:
         if args.pairwise.method != 'allpair':
@@ -134,12 +135,14 @@ def main(args):
 
     query_map = {}
     if args.run.ir_dataset_name is not None:
+        print("Loading dataset", args.run.ir_dataset_name)
         dataset = ir_datasets.load(args.run.ir_dataset_name)
         for query in dataset.queries_iter():
             qid = query.query_id
             text = query.text
             query_map[qid] = ranker.truncate(text, args.run.query_length)
         dataset = ir_datasets.load(args.run.ir_dataset_name)
+        print("dataset loaded", dataset.docs_count(), dataset.queries_count())
         docstore = dataset.docs_store()
     else:
         topics = get_topics(args.run.pyserini_index+'-test')
@@ -148,6 +151,7 @@ def main(args):
             query_map[str(topic_id)] = ranker.truncate(text, args.run.query_length)
         docstore = LuceneSearcher.from_prebuilt_index(args.run.pyserini_index+'.flat')
 
+    print("Loading first stage run")
     logger.info(f'Loading first stage run from {args.run.run_path}.')
     first_stage_rankings = []
     with open(args.run.run_path, 'r') as f:
@@ -179,6 +183,7 @@ def main(args):
     total_comparisons = 0
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_insertion_sort_inserts = 0
 
     tic = time.time()
     for qid, query, ranking in tqdm(first_stage_rankings):
@@ -193,12 +198,14 @@ def main(args):
         total_comparisons += ranker.total_compare
         total_prompt_tokens += ranker.total_prompt_tokens
         total_completion_tokens += ranker.total_completion_tokens
+        total_insertion_sort_inserts += ranker.total_insertion_sort_inserts
     toc = time.time()
 
     print(f'Avg comparisons: {total_comparisons/len(reranked_results)}')
     print(f'Avg prompt tokens: {total_prompt_tokens/len(reranked_results)}')
     print(f'Avg completion tokens: {total_completion_tokens/len(reranked_results)}')
     print(f'Avg time per query: {(toc-tic)/len(reranked_results)}')
+    print(f'Avg insertion sort inserts: {(total_insertion_sort_inserts / len(reranked_results))}')
 
     write_run_file(args.run.save_path, reranked_results, 'LLMRankers')
 
@@ -239,15 +246,15 @@ if __name__ == '__main__':
     setwise_parser = commands.add_parser('setwise')
     setwise_parser.add_argument('--num_child', type=int, default=3)
     setwise_parser.add_argument('--method', type=str, default='heapsort',
-                                choices=['heapsort', 'bubblesort'])
+                                choices=['heapsort', 'bubblesort', 'insertion.max_compare', 'insertion.sort_compare'])
     setwise_parser.add_argument('--k', type=int, default=10)
     setwise_parser.add_argument('--num_permutation', type=int, default=1)
+    setwise_parser.add_argument('--compare_prompt_variant', type=str, default='default', choices=['default', 'biased'])
 
     listwise_parser = commands.add_parser('listwise')
     listwise_parser.add_argument('--window_size', type=int, default=3)
     listwise_parser.add_argument('--step_size', type=int, default=1)
     listwise_parser.add_argument('--num_repeat', type=int, default=1)
-
     args = parse_args(parser, commands)
 
     if args.run.ir_dataset_name is not None and args.run.pyserini_index is not None:
