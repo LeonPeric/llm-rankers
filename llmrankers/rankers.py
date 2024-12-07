@@ -10,7 +10,9 @@ class SearchResult:
 
 
 class LlmRanker:
-    def rerank(self,  query: str, ranking: List[SearchResult]) -> Tuple[str, List[SearchResult]]:
+    def rerank(
+        self, query: str, ranking: List[SearchResult]
+    ) -> Tuple[str, List[SearchResult]]:
         raise NotImplementedError
 
     def truncate(self, text, length):

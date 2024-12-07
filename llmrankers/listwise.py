@@ -4,11 +4,48 @@ from typing import List
 import copy
 import openai
 import torch
-from transformers import T5Tokenizer, T5ForConditionalGeneration, AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import (
+    T5Tokenizer,
+    T5ForConditionalGeneration,
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    AutoConfig,
+)
+
+import ir_datasets
+from collections import deque
+
+
+dataset = ir_datasets.load("msmarco-passage/trec-dl-2019")
+
+qrels = dataset.qrels_dict()
+
+queries = dataset.queries_iter()
+
+queries_to_query_id = dict()
+for query in queries:
+    queries_to_query_id[query[1]] = query[0]
+
+
+def arrange_documents(documents):
+    arranged_docs = deque()
+
+    # Get keys in descending order
+    keys = sorted(documents.keys(), reverse=True)
+
+    for key in keys:
+        strings = documents[key]
+        for i, string in enumerate(strings):
+            if len(arranged_docs) == 0 or i % 2 == 0:
+                arranged_docs.append(string)
+            else:
+                arranged_docs.appendleft(string)
+
+    return list(arranged_docs)
 
 
 def max_tokens(model):
-    if 'gpt-4' in model:
+    if "gpt-4" in model:
         return 8192
     else:
         return 4096
@@ -19,11 +56,17 @@ def get_post_prompt(query, num):
 
 
 def get_prefix_prompt(query, num):
-    return [{'role': 'system',
-             'content': "You are RankGPT, an intelligent assistant that can rank passages based on their relevancy to the query."},
-            {'role': 'user',
-             'content': f"I will provide you with {num} passages, each indicated by number identifier []. \nRank the passages based on their relevance to query: {query}."},
-            {'role': 'assistant', 'content': 'Okay, please provide the passages.'}]
+    return [
+        {
+            "role": "system",
+            "content": "You are RankGPT, an intelligent assistant that can rank passages based on their relevancy to the query.",
+        },
+        {
+            "role": "user",
+            "content": f"I will provide you with {num} passages, each indicated by number identifier []. \nRank the passages based on their relevance to query: {query}.",
+        },
+        {"role": "assistant", "content": "Okay, please provide the passages."},
+    ]
 
 
 def num_tokens_from_messages(messages, model="gpt-3.5-turbo-0301"):
@@ -33,7 +76,9 @@ def num_tokens_from_messages(messages, model="gpt-3.5-turbo-0301"):
     elif model == "gpt-4":
         return num_tokens_from_messages(messages, model="gpt-4-0314")
     elif model == "gpt-3.5-turbo-0301":
-        tokens_per_message = 4  # every message follows <|start|>{role/name}\n{content}<|end|>\n
+        tokens_per_message = (
+            4  # every message follows <|start|>{role/name}\n{content}<|end|>\n
+        )
         tokens_per_name = -1  # if there's a name, the role is omitted
     elif model == "gpt-4-0314":
         tokens_per_message = 3
@@ -60,7 +105,9 @@ def num_tokens_from_messages(messages, model="gpt-3.5-turbo-0301"):
     return num_tokens
 
 
-def create_permutation_instruction_chat(query: str, docs: List[SearchResult], model_name='gpt-3.5-turbo'):
+def create_permutation_instruction_chat(
+    query: str, docs: List[SearchResult], model_name="gpt-3.5-turbo"
+):
     num = len(docs)
 
     max_length = 300
@@ -70,16 +117,21 @@ def create_permutation_instruction_chat(query: str, docs: List[SearchResult], mo
         for doc in docs:
             rank += 1
             content = doc.text
-            content = content.replace('Title: Content: ', '')
+            content = content.replace("Title: Content: ", "")
             content = content.strip()
             # For Japanese should cut by character: content = content[:int(max_length)]
-            content = ' '.join(content.split()[:int(max_length)])
-            messages.append({'role': 'user', 'content': f"[{rank}] {content}"})
-            messages.append({'role': 'assistant', 'content': f'Received passage [{rank}].'})
-        messages.append({'role': 'user', 'content': get_post_prompt(query, num)})
+            content = " ".join(content.split()[: int(max_length)])
+            messages.append({"role": "user", "content": f"[{rank}] {content}"})
+            messages.append(
+                {"role": "assistant", "content": f"Received passage [{rank}]."}
+            )
+        messages.append({"role": "user", "content": get_post_prompt(query, num)})
 
         if model_name is not None:
-            if num_tokens_from_messages(messages, model_name) <= max_tokens(model_name) - 200:
+            if (
+                num_tokens_from_messages(messages, model_name)
+                <= max_tokens(model_name) - 200
+            ):
                 break
             else:
                 max_length -= 1
@@ -88,33 +140,60 @@ def create_permutation_instruction_chat(query: str, docs: List[SearchResult], mo
     return messages
 
 
-def create_permutation_instruction_complete(query: str, docs: List[SearchResult]):
+def create_permutation_instruction_complete(
+    query: str, docs: List[SearchResult], qrels=qrels
+):
     num = len(docs)
-    message = f"This is RankGPT, an intelligent assistant that can rank passages based on their relevancy to the query.\n\n" \
-              f"The following are {num} passages, each indicated by number identifier []. " \
-              f"I can rank them based on their relevance to query: {query}\n\n"
+    message = (
+        f"This is RankGPT, an intelligent assistant that can rank passages based on their relevancy to the query.\n\n"
+        f"The following are {num} passages, each indicated by number identifier []. "
+        f"I can rank them based on their relevance to query: {query}\n\n"
+    )
 
     rank = 0
+    documents_with_relevance = {0: [], 1: [], 2: [], 3: []}
+
     for doc in docs:
-        rank += 1
         content = doc.text
-        content = content.replace('Title: Content: ', '')
+        doc_id = doc.docid
+        query_id = queries_to_query_id[query]
+        if doc_id not in qrels[query_id]:
+            relevance_score = 0
+        else:
+            relevance_score = qrels[query_id][doc_id]
+        content = content.replace("Title: Content: ", "")
         content = content.strip()
-        content = ' '.join(content.split()[:300])
+        content = " ".join(content.split()[:300])
+
+        documents_with_relevance[relevance_score].append(content)
+
+    print(
+        ", ".join(
+            f"{key}: {len(values)}" for key, values in documents_with_relevance.items()
+        )
+    )
+
+    sorted_docs = arrange_documents(documents_with_relevance)
+    rank = 1
+    for content in sorted_docs:
         message += f"[{rank}] {content}\n\n"
+        rank += 1
+
     message += f"The search query is: {query}"
-    message += f"I will rank the {num} passages above based on their relevance to the search query. The passages " \
-               "will be listed in descending order using identifiers, and the most relevant passages should be listed "\
-               "first, and the output format should be [] > [] > etc, e.g., [1] > [2] > etc.\n\n" \
-               f"The ranking results of the {num} passages (only identifiers) is:"
+    message += (
+        f"I will rank the {num} passages above based on their relevance to the search query. The passages "
+        "will be listed in descending order using identifiers, and the most relevant passages should be listed "
+        "first, and the output format should be [] > [] > etc, e.g., [1] > [2] > etc.\n\n"
+        f"The ranking results of the {num} passages (only identifiers) is:"
+    )
     return message
 
 
 def clean_response(response: str):
-    new_response = ''
+    new_response = ""
     for c in response:
         if not c.isdigit():
-            new_response += ' '
+            new_response += " "
         else:
             new_response += c
     new_response = new_response.strip()
@@ -133,7 +212,7 @@ def receive_permutation(ranking, permutation, rank_start=0, rank_end=100):
     response = clean_response(permutation)
     response = [int(x) - 1 for x in response.split()]
     response = remove_duplicate(response)
-    cut_range = copy.deepcopy(ranking[rank_start: rank_end])
+    cut_range = copy.deepcopy(ranking[rank_start:rank_end])
     original_rank = [tt for tt in range(len(cut_range))]
     response = [ss for ss in response if ss in original_rank]
     response = response + [tt for tt in original_rank if tt not in response]
@@ -165,17 +244,20 @@ class OpenAiListwiseLlmRanker(LlmRanker):
                     model=self.llm,
                     messages=messages,
                     temperature=0.0,
-                    request_timeout=15)
-                self.total_completion_tokens += int(completion['usage']['completion_tokens'])
-                self.total_prompt_tokens += int(completion['usage']['prompt_tokens'])
-                return completion['choices'][0]['message']['content']
+                    request_timeout=15,
+                )
+                self.total_completion_tokens += int(
+                    completion["usage"]["completion_tokens"]
+                )
+                self.total_prompt_tokens += int(completion["usage"]["prompt_tokens"])
+                return completion["choices"][0]["message"]["content"]
             except Exception as e:
                 print(str(e))
                 if "This model's maximum context length is" in str(e):
-                    print('reduce_length')
-                    return 'ERROR::reduce_length'
+                    print("reduce_length")
+                    return "ERROR::reduce_length"
 
-    def rerank(self,  query: str, ranking: List[SearchResult]) -> List[SearchResult]:
+    def rerank(self, query: str, ranking: List[SearchResult]) -> List[SearchResult]:
         self.total_compare = 0
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
@@ -186,7 +268,7 @@ class OpenAiListwiseLlmRanker(LlmRanker):
             start_pos = end_pos - self.window_size
             while start_pos >= 0:
                 start_pos = max(start_pos, 0)
-                result = self.compare(query, ranking[start_pos: end_pos])
+                result = self.compare(query, ranking[start_pos:end_pos])
                 ranking = receive_permutation(ranking, result, start_pos, end_pos)
                 end_pos = end_pos - self.step_size
                 start_pos = start_pos - self.step_size
@@ -200,92 +282,169 @@ class OpenAiListwiseLlmRanker(LlmRanker):
 
 
 class ListwiseLlmRanker(OpenAiListwiseLlmRanker):
-    CHARACTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L",
-                  "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V",
-                  "W"]  # "Passage X" and "Passage Y" will be tokenized into 3 tokens, so we dont use for now
+    CHARACTERS = [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "J",
+        "K",
+        "L",
+        "M",
+        "N",
+        "O",
+        "P",
+        "Q",
+        "R",
+        "S",
+        "T",
+        "U",
+        "V",
+        "W",
+    ]  # "Passage X" and "Passage Y" will be tokenized into 3 tokens, so we dont use for now
 
-    def __init__(self, model_name_or_path, tokenizer_name_or_path, device, window_size, step_size,
-                 scoring='generation', num_repeat=1, cache_dir=None):
+    def __init__(
+        self,
+        model_name_or_path,
+        tokenizer_name_or_path,
+        device,
+        window_size,
+        step_size,
+        scoring="generation",
+        num_repeat=1,
+        cache_dir=None,
+    ):
 
         self.scoring = scoring
         self.device = device
         self.window_size = window_size
         self.step_size = step_size
         self.num_repeat = num_repeat
-        self.config = AutoConfig.from_pretrained(model_name_or_path, cache_dir=cache_dir)
+        self.config = AutoConfig.from_pretrained(
+            model_name_or_path, cache_dir=cache_dir
+        )
 
-        if self.config.model_type == 't5':
-            self.tokenizer = T5Tokenizer.from_pretrained(tokenizer_name_or_path
-                                                         if tokenizer_name_or_path is not None else
-                                                         model_name_or_path, cache_dir=cache_dir)
-            self.llm = T5ForConditionalGeneration.from_pretrained(model_name_or_path,
-                                                                  device_map='auto',
-                                                                  torch_dtype=torch.float16 if device == 'cuda'
-                                                                  else torch.float32,
-                                                                  cache_dir=cache_dir)
+        if self.config.model_type == "t5":
+            self.tokenizer = T5Tokenizer.from_pretrained(
+                (
+                    tokenizer_name_or_path
+                    if tokenizer_name_or_path is not None
+                    else model_name_or_path
+                ),
+                cache_dir=cache_dir,
+            )
+            self.llm = T5ForConditionalGeneration.from_pretrained(
+                model_name_or_path,
+                device_map="auto",
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                cache_dir=cache_dir,
+            )
 
-            self.decoder_input_ids = self.tokenizer.encode("<pad> Passage",
-                                                           return_tensors="pt",
-                                                           add_special_tokens=False).to(self.device) if self.tokenizer else None
-            self.target_token_ids = self.tokenizer.batch_encode_plus([f'<pad> Passage {self.CHARACTERS[i]}'
-                                                                      for i in range(len(self.CHARACTERS))],
-                                                                     return_tensors="pt",
-                                                                     add_special_tokens=False,
-                                                                     padding=True).input_ids[:, -1]
-        elif self.config.model_type == 'llama':
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, cache_dir=cache_dir)
+            self.decoder_input_ids = (
+                self.tokenizer.encode(
+                    "<pad> Passage", return_tensors="pt", add_special_tokens=False
+                ).to(self.device)
+                if self.tokenizer
+                else None
+            )
+            self.target_token_ids = self.tokenizer.batch_encode_plus(
+                [
+                    f"<pad> Passage {self.CHARACTERS[i]}"
+                    for i in range(len(self.CHARACTERS))
+                ],
+                return_tensors="pt",
+                add_special_tokens=False,
+                padding=True,
+            ).input_ids[:, -1]
+        elif self.config.model_type == "llama":
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name_or_path, cache_dir=cache_dir
+            )
             self.tokenizer.use_default_system_prompt = False
-            if 'vicuna' and 'v1.5' in model_name_or_path:
+            if "vicuna" and "v1.5" in model_name_or_path:
                 self.tokenizer.chat_template = "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = 'A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user\\'s questions.' %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 %}{{ system_message }}{% endif %}{% if message['role'] == 'user' %}{{ ' USER: ' + message['content'].strip() }}{% elif message['role'] == 'assistant' %}{{ ' ASSISTANT: ' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ ' ASSISTANT:' }}{% endif %}"
 
-            self.llm = AutoModelForCausalLM.from_pretrained(model_name_or_path,
-                                                            device_map='auto',
-                                                            torch_dtype=torch.float16 if device == 'cuda'
-                                                            else torch.float32,
-                                                            cache_dir=cache_dir).eval()
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                device_map="auto",
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                cache_dir=cache_dir,
+            ).eval()
         else:
-            raise NotImplementedError(f"Model type {self.config.model_type} is not supported yet for listwise :(")
+            raise NotImplementedError(
+                f"Model type {self.config.model_type} is not supported yet for listwise :("
+            )
 
     def compare(self, query: str, docs: List):
         self.total_compare += 1
-        if self.scoring == 'generation':
-            if self.config.model_type == 't5':
+        if self.scoring == "generation":
+            if self.config.model_type == "t5":
                 input_text = create_permutation_instruction_complete(query, docs)
-                input_ids = self.tokenizer(input_text, return_tensors="pt", truncation=True).input_ids.to(self.device)
+                input_ids = self.tokenizer(
+                    input_text, return_tensors="pt", truncation=True
+                ).input_ids.to(self.device)
                 self.total_prompt_tokens += input_ids.shape[1]
 
                 output_ids = self.llm.generate(input_ids)[0]
                 self.total_completion_tokens += output_ids.shape[0]
-                output = self.tokenizer.decode(output_ids,
-                                               skip_special_tokens=True).strip()
-            elif self.config.model_type == 'llama':
-                input_text = create_permutation_instruction_chat(query, docs, model_name=None)
-                input_ids = self.tokenizer.apply_chat_template(input_text, return_tensors="pt",
-                                                               add_generation_prompt=True).to(self.device)
+                output = self.tokenizer.decode(
+                    output_ids, skip_special_tokens=True
+                ).strip()
+            elif self.config.model_type == "llama":
+                input_text = create_permutation_instruction_chat(
+                    query, docs, model_name=None
+                )
+                input_ids = self.tokenizer.apply_chat_template(
+                    input_text, return_tensors="pt", add_generation_prompt=True
+                ).to(self.device)
 
                 self.total_prompt_tokens += input_ids.shape[1]
 
                 output_ids = self.llm.generate(input_ids)[0]
                 self.total_completion_tokens += output_ids.shape[0]
-                output = self.tokenizer.decode(output_ids[input_ids.shape[1]:],
-                                               skip_special_tokens=True).strip()
+                output = self.tokenizer.decode(
+                    output_ids[input_ids.shape[1] :], skip_special_tokens=True
+                ).strip()
 
-        elif self.scoring == 'likelihood':
-            passages = "\n\n".join([f'Passage {self.CHARACTERS[i]}: "{doc.text}"' for i, doc in enumerate(docs)])
-            input_text = f'Given a query "{query}", which of the following passages is the most relevant one to the query?\n\n' \
-                         + passages + '\n\nOutput only the passage label of the most relevant passage:'
+        elif self.scoring == "likelihood":
+            passages = "\n\n".join(
+                [
+                    f'Passage {self.CHARACTERS[i]}: "{doc.text}"'
+                    for i, doc in enumerate(docs)
+                ]
+            )
+            input_text = (
+                f'Given a query "{query}", which of the following passages is the most relevant one to the query?\n\n'
+                + passages
+                + "\n\nOutput only the passage label of the most relevant passage:"
+            )
 
-            input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(self.device)
+            input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(
+                self.device
+            )
             self.total_prompt_tokens += input_ids.shape[1]
 
             with torch.no_grad():
-                logits = self.llm(input_ids=input_ids, decoder_input_ids=self.decoder_input_ids).logits[0][-1]
+                logits = self.llm(
+                    input_ids=input_ids, decoder_input_ids=self.decoder_input_ids
+                ).logits[0][-1]
                 distributions = torch.softmax(logits, dim=0)
-                scores = distributions[self.target_token_ids[:len(docs)]]
-                ranked = sorted(zip([f"[{str(i+1)}]" for i in range(len(docs))], scores), key=lambda x: x[1], reverse=True)
-                output = '>'.join(ranked[i][0] for i in range(len(ranked)))
+                scores = distributions[self.target_token_ids[: len(docs)]]
+                ranked = sorted(
+                    zip([f"[{str(i+1)}]" for i in range(len(docs))], scores),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+                output = ">".join(ranked[i][0] for i in range(len(ranked)))
 
         return output
 
     def truncate(self, text, length):
-        return self.tokenizer.convert_tokens_to_string(self.tokenizer.tokenize(text)[:length])
+        return self.tokenizer.convert_tokens_to_string(
+            self.tokenizer.tokenize(text)[:length]
+        )

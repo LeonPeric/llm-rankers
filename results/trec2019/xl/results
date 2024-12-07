@@ -1,0 +1,21 @@
+pointwise yes no
+ndcg 0.6503
+
+pointwise qlm
+ndcg 0.5410
+
+listwise generation
+ndcg 0.5684
+
+listwise likelihood
+ndcg 0.6905
+
+pairwise bubblesort
+ndcg 0.6830
+
+pairwise heapsort
+ndcg 0.7055
+
+setwise bubblesort
+ndcg 0.7053
+setwise heapsort
